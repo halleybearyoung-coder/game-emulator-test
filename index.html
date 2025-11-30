@@ -81,6 +81,348 @@ class CHIP8 {
       0xF0,0x10,0xF0,0x80,0xF0, // 2
       0xF0,0x10,0xF0,0x10,0xF0, // 3
       0x90,0x90,0xF0,0x10,0x10, // 4
-      0xF0,0x8
+      0xF0,0x80,0xF0,0x10,0xF0, // 5
+      0xF0,0x80,0xF0,0x90,0xF0, // 6
+      0xF0,0x10,0x20,0x40,0x40, // 7
+      0xF0,0x90,0xF0,0x90,0xF0, // 8
+      0xF0,0x90,0xF0,0x10,0xF0, // 9
+      0xF0,0x90,0xF0,0x90,0x90, // A
+      0xE0,0x90,0xE0,0x90,0xE0, // B
+      0xF0,0x80,0x80,0x80,0xF0, // C
+      0xE0,0x90,0x90,0x90,0xE0, // D
+      0xF0,0x80,0xF0,0x80,0xF0, // E
+      0xF0,0x80,0xF0,0x80,0x80  // F
+    ];
+    for (let i=0;i<font.length;i++) this.memory[i]=font[i];
+    this.waitingForKey=false;
+    this.waitKeyReg = 0;
+  }
 
-    
+  loadRom(buffer){
+    this.reset();
+    for(let i=0;i<buffer.length;i++){
+      this.memory[0x200 + i] = buffer[i];
+    }
+    this.pc = 0x200;
+    this.paused = false;
+    this.drawFlag = true;
+  }
+
+  cycle(){
+    if (this.paused) return;
+    if (this.waitingForKey) return; // halt until key
+    // fetch
+    const opcode = (this.memory[this.pc]<<8) | this.memory[this.pc+1];
+    this.execute(opcode);
+    // timers handled outside (once per 60Hz)
+  }
+
+  execute(op){
+    // common helpers
+    const x = (op & 0x0F00) >> 8;
+    const y = (op & 0x00F0) >> 4;
+    const nnn = op & 0x0FFF;
+    const kk = op & 0x00FF;
+    const n = op & 0x000F;
+    this.pc += 2;
+
+    switch(op & 0xF000){
+      case 0x0000:
+        if (op === 0x00E0) { // CLS
+          this.display.fill(0); this.drawFlag=true;
+        } else if (op === 0x00EE) { // RET
+          this.pc = this.stack.pop();
+        } else {
+          // SYS nnn ignored
+        }
+        break;
+      case 0x1000: this.pc = nnn; break; // JP addr
+      case 0x2000: this.stack.push(this.pc); this.pc = nnn; break; // CALL
+      case 0x3000: if (this.V[x] === kk) this.pc += 2; break; // SE Vx, byte
+      case 0x4000: if (this.V[x] !== kk) this.pc += 2; break; // SNE
+      case 0x5000: if (this.V[x] === this.V[y]) this.pc += 2; break; // SE Vx, Vy
+      case 0x6000: this.V[x] = kk; break; // LD Vx, byte
+      case 0x7000: this.V[x] = (this.V[x] + kk) & 0xFF; break; // ADD
+      case 0x8000:
+        switch(n){
+          case 0x0: this.V[x] = this.V[y]; break; // LD
+          case 0x1: this.V[x] |= this.V[y]; break; // OR
+          case 0x2: this.V[x] &= this.V[y]; break; // AND
+          case 0x3: this.V[x] ^= this.V[y]; break; // XOR
+          case 0x4: {
+            const sum = this.V[x] + this.V[y];
+            this.V[0xF] = sum > 0xFF ? 1 : 0;
+            this.V[x] = sum & 0xFF;
+            break;
+          }
+          case 0x5: {
+            this.V[0xF] = this.V[x] > this.V[y] ? 1 : 0;
+            this.V[x] = (this.V[x] - this.V[y]) & 0xFF;
+            break;
+          }
+          case 0x6: {
+            this.V[0xF] = this.V[x] & 1;
+            this.V[x] >>= 1;
+            break;
+          }
+          case 0x7: {
+            this.V[0xF] = this.V[y] > this.V[x] ? 1 : 0;
+            this.V[x] = (this.V[y] - this.V[x]) & 0xFF;
+            break;
+          }
+          case 0xE: {
+            this.V[0xF] = (this.V[x] & 0x80) >> 7;
+            this.V[x] = (this.V[x] << 1) & 0xFF;
+            break;
+          }
+        }
+        break;
+      case 0x9000: if (this.V[x] !== this.V[y]) this.pc += 2; break;
+      case 0xA000: this.I = nnn; break;
+      case 0xB000: this.pc = nnn + this.V[0]; break;
+      case 0xC000: this.V[x] = (Math.floor(Math.random()*256) & kk); break;
+      case 0xD000: { // DRW Vx, Vy, nibble
+        const vx = this.V[x] % 64;
+        const vy = this.V[y] % 32;
+        this.V[0xF] = 0;
+        for (let row=0; row<n; row++){
+          const sprite = this.memory[this.I + row];
+          for (let col=0; col<8; col++){
+            const px = (vx + col) % 64;
+            const py = (vy + row) % 32;
+            const bit = (sprite >> (7-col)) & 1;
+            const idx = px + py*64;
+            if (bit) {
+              if (this.display[idx] === 1) this.V[0xF] = 1;
+              this.display[idx] ^= 1;
+            }
+          }
+        }
+        this.drawFlag = true;
+        break;
+      }
+      case 0xE000:
+        if (kk === 0x9E) { if (this.keys[this.V[x]]) this.pc += 2; }
+        if (kk === 0xA1) { if (!this.keys[this.V[x]]) this.pc += 2; }
+        break;
+      case 0xF000:
+        switch(kk){
+          case 0x07: this.V[x] = this.delayTimer; break;
+          case 0x0A: // LD Vx, K (wait for key)
+            this.waitingForKey = true;
+            this.waitKeyReg = x;
+            break;
+          case 0x15: this.delayTimer = this.V[x]; break;
+          case 0x18: this.soundTimer = this.V[x]; break;
+          case 0x1E: this.I = (this.I + this.V[x]) & 0xFFFF; break;
+          case 0x29: this.I = this.V[x]*5; break; // font char
+          case 0x33: { // BCD
+            const val = this.V[x];
+            this.memory[this.I] = Math.floor(val/100);
+            this.memory[this.I+1] = Math.floor((val%100)/10);
+            this.memory[this.I+2] = val % 10;
+            break;
+          }
+          case 0x55: for(let i=0;i<=x;i++) this.memory[this.I+i]=this.V[i]; break;
+          case 0x65: for(let i=0;i<=x;i++) this.V[i]=this.memory[this.I+i]; break;
+        }
+        break;
+      default:
+        // unimplemented opcode: ignore
+        break;
+    }
+  }
+}
+
+/* ----- Boot & UI ----- */
+const vm = new CHIP8();
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+let scale = 6;
+const status = document.getElementById('status');
+const fpsEl = document.getElementById('fps');
+
+function render(){
+  const w = 64, h = 32;
+  canvas.width = w * scale;
+  canvas.height = h * scale;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#fff';
+  const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      const v = vm.display[x + y*w];
+      if (v){
+        ctx.fillRect(x*scale, y*scale, scale, scale);
+      }
+    }
+  }
+}
+
+function setStatus(s){ status.textContent = s; }
+function beepOn(){ if (!audioCtx) createBeep(); if (osc) osc.start(0); }
+function beepOff(){ try{ if(osc) osc.stop(0);}catch(e){} osc=null; }
+
+/* WebAudio simple beep (start/stop each 60Hz tick when sound>0) */
+let audioCtx=null, osc=null, gainNode=null;
+function createBeep(){
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  osc = audioCtx.createOscillator();
+  gainNode = audioCtx.createGain();
+  osc.type = 'square';
+  osc.frequency.value = 880;
+  gainNode.gain.value = 0.05;
+  osc.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+}
+
+/* keyboard mapping to CHIP-8 hex keypad:
+  CHIP-8 layout:
+  1 2 3 C
+  4 5 6 D
+  7 8 9 E
+  A 0 B F
+  We'll map common keys:
+  1 2 3 4 -> 1 2 3 C
+  Q W E R -> 4 5 6 D
+  A S D F -> 7 8 9 E
+  Z X C V -> A 0 B F
+*/
+const keyMap = {
+  '1':0x1,'2':0x2,'3':0x3,'4':0xC,
+  'q':0x4,'w':0x5,'e':0x6,'r':0xD,
+  'a':0x7,'s':0x8,'d':0x9,'f':0xE,
+  'z':0xA,'x':0x0,'c':0xB,'v':0xF
+};
+
+window.addEventListener('keydown', (ev)=>{
+  const k = ev.key.toLowerCase();
+  if (k in keyMap) {
+    vm.keys[keyMap[k]] = true;
+    if (vm.waitingForKey){
+      vm.V[vm.waitKeyReg] = keyMap[k];
+      vm.waitingForKey = false;
+    }
+    ev.preventDefault();
+  }
+});
+window.addEventListener('keyup', (ev)=>{
+  const k = ev.key.toLowerCase();
+  if (k in keyMap) vm.keys[keyMap[k]] = false;
+});
+
+/* Drag & drop ROM */
+window.addEventListener('dragover', e => { e.preventDefault(); });
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer.files && e.dataTransfer.files.length) {
+    loadFile(e.dataTransfer.files[0]);
+  }
+});
+
+/* UI controls */
+document.getElementById('romfile').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0];
+  if (f) loadFile(f);
+});
+
+document.getElementById('runBtn').addEventListener('click', ()=>{
+  vm.paused = false; setStatus('Running');
+});
+document.getElementById('pauseBtn').addEventListener('click', ()=>{
+  vm.paused = true; setStatus('Paused');
+});
+document.getElementById('resetBtn').addEventListener('click', ()=>{
+  vm.reset(); setStatus('Reset');
+  render();
+});
+document.getElementById('stepBtn').addEventListener('click', ()=>{
+  vm.paused = true;
+  vm.cycle();
+  render();
+});
+document.getElementById('speed').addEventListener('change', ()=>{ /* handled by loop */ });
+document.getElementById('scale').addEventListener('change', (e)=>{
+  scale = parseInt(e.target.value,10);
+  render();
+});
+
+/* load file helper */
+function loadFile(file){
+  const reader = new FileReader();
+  reader.onload = function(ev){
+    const arr = new Uint8Array(ev.target.result);
+    vm.loadRom(arr);
+    setStatus('Loaded: ' + file.name);
+    render();
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+/* Main loop: run CPU cycles at adjustable rate (Hz), and timers at 60Hz */
+let lastTime = performance.now();
+let cyclesPerSecond = parseInt(document.getElementById('speed').value,10);
+let accumulator = 0;
+let cyclesCount = 0;
+let fpsCounter = 0, fpsTime = performance.now();
+
+function mainLoop(now){
+  const dt = now - lastTime;
+  lastTime = now;
+  // update cycles per second from UI
+  cyclesPerSecond = parseInt(document.getElementById('speed').value,10);
+  const cyclesThisFrame = cyclesPerSecond * (dt/1000);
+  // integer cycles
+  let cycles = Math.floor(cyclesThisFrame);
+  for (let i=0;i<cycles;i++){
+    vm.cycle();
+    cyclesCount++;
+  }
+  // 60Hz timers
+  // accumulate time and tick timers every 1/60s
+  accumulator += dt;
+  while (accumulator >= (1000/60)) {
+    if (vm.delayTimer > 0) vm.delayTimer--;
+    if (vm.soundTimer > 0) {
+      vm.soundTimer--;
+      // sound on when >0
+      if (audioCtx === null) createBeep();
+      if (!osc) {
+        createBeep();
+      }
+      // start oscillator briefly
+      if (!oscStarted){
+        try{ osc.start(); }catch(e){} oscStarted=true;
+      }
+    } else {
+      if (osc){ try{ osc.stop(); }catch(e){} osc=null; oscStarted=false; audioCtx=null; }
+    }
+    accumulator -= (1000/60);
+  }
+
+  // render if needed
+  if (vm.drawFlag) {
+    render();
+    vm.drawFlag = false;
+  }
+
+  // FPS display (cycles per second seen)
+  fpsCounter++;
+  if (performance.now() - fpsTime > 500) {
+    fpsEl.textContent = `Cycles run: ${cyclesCount} | Display updates: ${fpsCounter}`;
+    cyclesCount = 0; fpsCounter=0; fpsTime = performance.now();
+  }
+
+  requestAnimationFrame(mainLoop);
+}
+let oscStarted = false;
+requestAnimationFrame(mainLoop);
+
+/* Small demo loader: if user wants a test ROM included, they can drag a ROM here.
+   We don't embed ROMs due to copyright. */
+setStatus('Ready — load a ROM to begin.');
+
+</script>
+</body>
+</html>
